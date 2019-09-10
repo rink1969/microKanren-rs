@@ -1,9 +1,10 @@
-use std::cmp::PartialEq;
+#![allow(non_snake_case)]
 use std::fmt;
+use std::rc::Rc;
 
 // define variable
 // implement eq and fmt
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Var {
     index: usize,
 }
@@ -11,12 +12,6 @@ pub struct Var {
 impl Var {
     pub fn new(index: usize) -> Self {
         Var { index }
-    }
-}
-
-impl PartialEq for Var {
-    fn eq(&self, other: &Self) -> bool {
-        self.index == other.index
     }
 }
 
@@ -50,9 +45,9 @@ impl Value {
         }
     }
 
-    pub fn to_var(self) -> Option<Var> {
+    pub fn to_var(&self) -> Option<Var> {
         match self {
-            Value::Variable(x) => Some(x),
+            Value::Variable(x) => Some(x.clone()),
             _ => None,
         }
     }
@@ -95,7 +90,7 @@ impl fmt::Display for Assoc {
 }
 
 // Subst is a group of bindings
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Subst {
     s: Vec<Assoc>,
 }
@@ -178,7 +173,7 @@ pub fn unify(v0: &Value, v1: &Value, s: &mut Subst) -> bool {
     }
 
     s.clear();
-    return false;
+    false
 }
 
 // State include a Subst and next variable index
@@ -249,6 +244,10 @@ impl SStream {
         self.states.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
     pub fn get_states(&self) -> &[State] {
         &self.states
     }
@@ -279,6 +278,38 @@ impl fmt::Display for SStream {
     }
 }
 
+type Fp = Rc<Box<dyn Fn(&mut State) -> SStream>>;
+#[derive(Clone)]
+pub struct GoalFn {
+    f: Fp,
+}
+
+impl GoalFn {
+    pub fn new(f: Fp) -> Self {
+        GoalFn { f }
+    }
+
+    pub fn run(&self, s: &mut State) -> SStream {
+        (self.f)(s)
+    }
+}
+
+type FreshFp = Rc<Box<dyn Fn(Var) -> GoalFn>>;
+#[derive(Clone)]
+pub struct FreshFn {
+    f: FreshFp,
+}
+
+impl FreshFn {
+    pub fn new(f: FreshFp) -> Self {
+        FreshFn { f }
+    }
+
+    pub fn run(&self, v: Var) -> GoalFn {
+        (self.f)(v)
+    }
+}
+
 pub fn mplus(ss0: &SStream, ss1: &SStream) -> SStream {
     let mut states = Vec::new();
     states.extend_from_slice(ss0.get_states());
@@ -286,53 +317,47 @@ pub fn mplus(ss0: &SStream, ss1: &SStream) -> SStream {
     SStream::new(states)
 }
 
-pub fn bind(ss0: &mut SStream, g: &Fn(&mut State) -> SStream) -> SStream {
+pub fn bind(ss0: &mut SStream, g: GoalFn) -> SStream {
     let mut new_ss = SStream::empty_stream();
-    for ref mut state in ss0.get_states_mut() {
-        let tmp_ss = g(state);
+    for state in ss0.get_states_mut() {
+        let tmp_ss = g.run(state);
         new_ss = mplus(&new_ss, &tmp_ss);
     }
     new_ss
 }
 
-pub fn fresh(s: &mut State) -> Var {
-    let v = Var::new(s.get_c());
-    s.inc_c();
-    v
+pub fn callfresh(f: FreshFn) -> GoalFn {
+    GoalFn::new(Rc::new(Box::new(move |s| {
+        let v = Var::new(s.get_c());
+        s.inc_c();
+        f.run(v).run(s)
+    })))
 }
 
-/*
-pub fn callfresh(f: &Fn(Var) -> SStream) -> (&Fn(&mut State) -> SStream) {
-    &move |s| { let v = fresh(s); f(v)}
-}
-*/
-
-pub fn same(v0: Value, v1: Value, s: &mut State) -> SStream {
-    let mut ret = SStream::empty_stream();
-    if unify(&v0, &v1, s.get_s()) {
-        ret.add(s.clone());
-    }
-    ret
+pub fn same(v0: Value, v1: Value) -> GoalFn {
+    GoalFn::new(Rc::new(Box::new(move |s| {
+        let mut ret = SStream::empty_stream();
+        if unify(&v0, &v1, s.get_s()) {
+            ret.add(s.clone());
+        }
+        ret
+    })))
 }
 
-pub fn conj(
-    g0: &Fn(&mut State) -> SStream,
-    g1: &Fn(&mut State) -> SStream,
-    s: &mut State,
-) -> SStream {
-    let mut ss0 = g0(s);
-    bind(&mut ss0, g1)
+pub fn conj(g0: GoalFn, g1: GoalFn) -> GoalFn {
+    GoalFn::new(Rc::new(Box::new(move |s| {
+        let mut ss0 = g0.run(s);
+        bind(&mut ss0, g1.clone())
+    })))
 }
 
-pub fn disj(
-    g0: &Fn(&mut State) -> SStream,
-    g1: &Fn(&mut State) -> SStream,
-    s: &mut State,
-) -> SStream {
-    let mut s1 = s.clone();
-    let ss0 = g0(s);
-    let ss1 = g1(&mut s1);
-    mplus(&ss0, &ss1)
+pub fn disj(g0: GoalFn, g1: GoalFn) -> GoalFn {
+    GoalFn::new(Rc::new(Box::new(move |s| {
+        let mut s1 = s.clone();
+        let ss0 = g0.run(s);
+        let ss1 = g1.run(&mut s1);
+        mplus(&ss0, &ss1)
+    })))
 }
 
 #[cfg(test)]
@@ -404,37 +429,13 @@ mod test {
     #[test]
     fn goal_basic() {
         let mut s = State::empty_state();
-        let x0 = fresh(&mut s);
-        let mut ss = same(Value::new_var(x0.clone()), Value::new_num(1), &mut s);
-        assert_eq!(ss.len(), 1);
-        let x1 = fresh(&mut s);
-        let ss1 = bind(&mut ss, &|s| {
-            same(Value::new_var(x0.clone()), Value::new_var(x1.clone()), s)
-        });
-        assert_eq!(ss1.len(), 1);
-        // result  x1 = 1
-        assert_eq!(
-            ss1.latest_state().lookup(&Value::new_var(x1)),
-            Value::new_num(1)
-        );
-    }
-
-    fn fives(x: Var, s: &mut State) -> SStream {
-        same(Value::new_var(x), Value::new_num(5), s)
-    }
-
-    fn six(x: Var, s: &mut State) -> SStream {
-        same(Value::new_var(x), Value::new_num(6), s)
-    }
-
-    fn fivesorsix(x: Var, s: &mut State) -> SStream {
-        disj(&|s1| fives(x.clone(), s1), &|s2| six(x.clone(), s2), s)
-    }
-
-    #[test]
-    fn goal_complex() {
-        let mut s = State::empty_state();
-        let x0 = fresh(&mut s);
-        println!("result = {}", fivesorsix(x0.clone(), &mut s));
+        println!(
+            "result = {}",
+            callfresh(FreshFn::new(Rc::new(Box::new(move |q| disj(
+                same(Value::new_var(q.clone()), Value::new_num(5)),
+                same(Value::new_var(q), Value::new_num(6))
+            )))))
+            .run(&mut s)
+        )
     }
 }
