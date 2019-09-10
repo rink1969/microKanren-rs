@@ -226,55 +226,53 @@ impl fmt::Display for State {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SStream {
-    states: Vec<State>,
+type TrunkFp = Rc<Box<dyn Fn() -> SStream>>;
+#[derive(Clone)]
+pub struct TrunkFn {
+    f: TrunkFp,
+}
+
+impl TrunkFn {
+    pub fn new(f: TrunkFp) -> Self {
+        TrunkFn { f }
+    }
+
+    pub fn run(&self) -> SStream {
+        (self.f)()
+    }
+}
+
+#[derive(Clone)]
+pub enum SStream {
+    STATES(Vec<State>),
+    TRUNK(TrunkFn),
 }
 
 impl SStream {
     pub fn empty_stream() -> Self {
-        SStream { states: Vec::new() }
+        SStream::STATES(Vec::new())
     }
 
     pub fn new(states: Vec<State>) -> Self {
-        SStream { states }
+        SStream::STATES(states)
     }
 
-    pub fn len(&self) -> usize {
-        self.states.len()
+    pub fn new_trunk(f: TrunkFn) -> Self {
+        SStream::TRUNK(f)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.states.is_empty()
-    }
-
-    pub fn get_states(&self) -> &[State] {
-        &self.states
-    }
-
-    pub fn get_states_mut(&mut self) -> &mut [State] {
-        &mut self.states
-    }
-
-    pub fn latest_state(&self) -> &State {
-        &self.states[self.states.len() - 1]
+    pub fn is_trunk(&self) -> bool {
+        match self {
+            SStream::STATES(_) => false,
+            _ => true,
+        }
     }
 
     pub fn add(&mut self, state: State) {
-        self.states.push(state);
-    }
-}
-
-impl fmt::Display for SStream {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut fmt_str = String::new();
-        fmt_str.push_str("[");
-        for s in self.states.iter() {
-            fmt_str.push_str(&s.to_string());
-            fmt_str.push_str(", ");
+        match self {
+            SStream::STATES(ref mut s) => s.push(state),
+            _ => panic!("add state failed"),
         }
-        fmt_str.push_str("]");
-        write!(f, "{}", fmt_str)
     }
 }
 
@@ -310,20 +308,39 @@ impl FreshFn {
     }
 }
 
-pub fn mplus(ss0: &SStream, ss1: &SStream) -> SStream {
+pub fn mplus(ss0: SStream, ss1: SStream) -> SStream {
     let mut states = Vec::new();
-    states.extend_from_slice(ss0.get_states());
-    states.extend_from_slice(ss1.get_states());
-    SStream::new(states)
+    let bak_ss0 = ss0.clone();
+    let bak_ss1 = ss1.clone();
+    match ss0 {
+        SStream::TRUNK(_) => SStream::new_trunk(TrunkFn::new(Rc::new(Box::new(move || {mplus(bak_ss0.clone(), bak_ss1.clone())} )))),
+        SStream::STATES(s0) => {
+            match ss1 {
+                SStream::TRUNK(_) => SStream::new_trunk(TrunkFn::new(Rc::new(Box::new(move || {mplus(bak_ss0.clone(), bak_ss1.clone())} )))),
+                SStream::STATES(s1) => {
+                    states.extend_from_slice(&s0);
+                    states.extend_from_slice(&s1);
+                    SStream::new(states)
+                }
+            }
+        }
+    }
 }
 
-pub fn bind(ss0: &mut SStream, g: GoalFn) -> SStream {
+pub fn bind(ss0: SStream, g: GoalFn) -> SStream {
     let mut new_ss = SStream::empty_stream();
-    for state in ss0.get_states_mut() {
-        let tmp_ss = g.run(state);
-        new_ss = mplus(&new_ss, &tmp_ss);
+    let bak_ss0 = ss0.clone();
+    let bak_g = g.clone();
+    match ss0 {
+        SStream::TRUNK(_) => SStream::new_trunk(TrunkFn::new(Rc::new(Box::new(move || {bind(bak_ss0.clone(), bak_g.clone())} )))),
+        SStream::STATES(s0) => {
+            for mut state in s0 {
+                let tmp_ss = g.run(&mut state);
+                new_ss = mplus(new_ss, tmp_ss);
+            }
+            new_ss
+        }
     }
-    new_ss
 }
 
 pub fn callfresh(f: FreshFn) -> GoalFn {
@@ -346,8 +363,8 @@ pub fn same(v0: Value, v1: Value) -> GoalFn {
 
 pub fn conj(g0: GoalFn, g1: GoalFn) -> GoalFn {
     GoalFn::new(Rc::new(Box::new(move |s| {
-        let mut ss0 = g0.run(s);
-        bind(&mut ss0, g1.clone())
+        let ss0 = g0.run(s);
+        bind(ss0, g1.clone())
     })))
 }
 
@@ -356,9 +373,39 @@ pub fn disj(g0: GoalFn, g1: GoalFn) -> GoalFn {
         let mut s1 = s.clone();
         let ss0 = g0.run(s);
         let ss1 = g1.run(&mut s1);
-        mplus(&ss0, &ss1)
+        mplus(ss0, ss1)
     })))
 }
+
+// util functions
+pub fn callgoal(g: GoalFn) -> SStream {
+    let mut s = State::empty_state();
+    g.run(&mut s)
+}
+
+pub fn printSS(ss: SStream, count: usize) {
+    let mut i = count;
+    let mut ss = ss;
+    while i > 0 {
+        match ss.clone() {
+            SStream::TRUNK(f) => {
+                println!("trunk");
+                ss = f.run();
+            },
+            SStream::STATES(states) => {
+                print!("[");
+                for s in states {
+                    print!("{}", s);
+                    print!(", ");
+                }
+                print!("]");
+                return;
+            }
+        }
+        i -= 1;
+    }
+}
+
 
 #[cfg(test)]
 mod test {
@@ -429,13 +476,30 @@ mod test {
     #[test]
     fn goal_basic() {
         let mut s = State::empty_state();
-        println!(
-            "result = {}",
+        printSS(
             callfresh(FreshFn::new(Rc::new(Box::new(move |q| disj(
                 same(Value::new_var(q.clone()), Value::new_num(5)),
                 same(Value::new_var(q), Value::new_num(6))
             )))))
-            .run(&mut s)
+            .run(&mut s), 10
         )
     }
+/*
+    fn fives(v: Var) -> GoalFn {
+        let bak_v = v.clone();
+        GoalFn::new(Rc::new(Box::new(move |s| {
+            disj(
+                same(Value::new_var(v.clone()), Value::new_num(5)),
+                GoalFn::new(Rc::new(Box::new(move |s| { SStream::new_trunk(TrunkFn::new(Rc::new(Box::new(move || {fives(bak_v.clone()).run(s)}))))})))
+            ).run(s)
+        })))
+    }
+
+    #[test]
+    fn goal_recursive() {
+        printSS(
+            callgoal(callfresh(FreshFn::new(Rc::new(Box::new(fives))))), 10
+        );
+    }
+*/
 }
