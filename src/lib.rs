@@ -5,20 +5,12 @@ use std::fmt;
 // implement eq and fmt
 #[derive(Debug, Clone)]
 pub struct Var {
-    name: String,
     index: usize,
 }
 
 impl Var {
-    pub fn new(name: String, index: usize) -> Self {
-        Var { name, index }
-    }
-
-    pub fn new_x(index: usize) -> Self {
-        Var {
-            name: format!("X{}", index),
-            index,
-        }
+    pub fn new(index: usize) -> Self {
+        Var { index }
     }
 }
 
@@ -30,7 +22,7 @@ impl PartialEq for Var {
 
 impl fmt::Display for Var {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "({}(#{}))", self.name, self.index)
+        write!(f, "#({})", self.index)
     }
 }
 
@@ -66,8 +58,17 @@ impl Value {
     }
 }
 
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Variable(x) => write!(f, "{}", x),
+            Value::Num(x) => write!(f, "{}", x),
+        }
+    }
+}
+
 // Assoc is a binding between var and value
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Assoc {
     var: Var,
     val: Value,
@@ -87,8 +88,14 @@ impl Assoc {
     }
 }
 
+impl fmt::Display for Assoc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} = {}", self.var, self.val)
+    }
+}
+
 // Subst is a group of bindings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Subst {
     s: Vec<Assoc>,
 }
@@ -104,10 +111,6 @@ impl Subst {
 
     pub fn len(&self) -> usize {
         self.s.len()
-    }
-
-    pub fn get_a(&self, index: usize) -> Assoc {
-        self.s[index].clone()
     }
 
     pub fn walk(&self, v: &Value) -> Value {
@@ -139,6 +142,19 @@ impl Subst {
 
     pub fn clear(&mut self) {
         self.s.clear();
+    }
+}
+
+impl fmt::Display for Subst {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut fmt_str = String::new();
+        fmt_str.push_str("{");
+        for s in self.s.iter() {
+            fmt_str.push_str(&s.to_string());
+            fmt_str.push_str("; ");
+        }
+        fmt_str.push_str("}");
+        write!(f, "{}", fmt_str)
     }
 }
 
@@ -205,38 +221,118 @@ impl State {
     }
 }
 
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut fmt_str = String::new();
+        fmt_str.push_str("(");
+        fmt_str.push_str(&self.s.to_string());
+        fmt_str.push_str(")");
+        write!(f, "{}", fmt_str)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SStream {
+    states: Vec<State>,
+}
+
+impl SStream {
+    pub fn empty_stream() -> Self {
+        SStream { states: Vec::new() }
+    }
+
+    pub fn new(states: Vec<State>) -> Self {
+        SStream { states }
+    }
+
+    pub fn len(&self) -> usize {
+        self.states.len()
+    }
+
+    pub fn get_states(&self) -> &[State] {
+        &self.states
+    }
+
+    pub fn get_states_mut(&mut self) -> &mut [State] {
+        &mut self.states
+    }
+
+    pub fn latest_state(&self) -> &State {
+        &self.states[self.states.len() - 1]
+    }
+
+    pub fn add(&mut self, state: State) {
+        self.states.push(state);
+    }
+}
+
+impl fmt::Display for SStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut fmt_str = String::new();
+        fmt_str.push_str("[");
+        for s in self.states.iter() {
+            fmt_str.push_str(&s.to_string());
+            fmt_str.push_str(", ");
+        }
+        fmt_str.push_str("]");
+        write!(f, "{}", fmt_str)
+    }
+}
+
+pub fn mplus(ss0: &SStream, ss1: &SStream) -> SStream {
+    let mut states = Vec::new();
+    states.extend_from_slice(ss0.get_states());
+    states.extend_from_slice(ss1.get_states());
+    SStream::new(states)
+}
+
+pub fn bind(ss0: &mut SStream, g: &Fn(&mut State) -> SStream) -> SStream {
+    let mut new_ss = SStream::empty_stream();
+    for ref mut state in ss0.get_states_mut() {
+        let tmp_ss = g(state);
+        new_ss = mplus(&new_ss, &tmp_ss);
+    }
+    new_ss
+}
+
 pub fn fresh(s: &mut State) -> Var {
-    let v = Var::new_x(s.get_c());
+    let v = Var::new(s.get_c());
     s.inc_c();
-    println!("fresh new var {:?}", v);
     v
 }
 
-pub fn same(v0: Value, v1: Value, s: &mut State) -> bool {
-    unify(&v0, &v1, s.get_s())
+/*
+pub fn callfresh(f: &Fn(Var) -> SStream) -> (&Fn(&mut State) -> SStream) {
+    &move |s| { let v = fresh(s); f(v)}
 }
+*/
 
-pub fn conj(g0: &Fn(&mut State) -> bool, g1: &Fn(&mut State) -> bool, s: &mut State) -> Vec<State> {
-    let mut ret = Vec::new();
-    if g0(s) {
-        if g1(s) {
-            ret.push(s.clone());
-        }
+pub fn same(v0: Value, v1: Value, s: &mut State) -> SStream {
+    let mut ret = SStream::empty_stream();
+    if unify(&v0, &v1, s.get_s()) {
+        ret.add(s.clone());
     }
     ret
 }
 
-pub fn disj(g0: &Fn(&mut State) -> bool, g1: &Fn(&mut State) -> bool, s: &mut State) -> Vec<State> {
-    let mut ret = Vec::new();
+pub fn conj(
+    g0: &Fn(&mut State) -> SStream,
+    g1: &Fn(&mut State) -> SStream,
+    s: &mut State,
+) -> SStream {
+    let mut ss0 = g0(s);
+    bind(&mut ss0, g1)
+}
+
+pub fn disj(
+    g0: &Fn(&mut State) -> SStream,
+    g1: &Fn(&mut State) -> SStream,
+    s: &mut State,
+) -> SStream {
     let mut s1 = s.clone();
-    if g0(s) {
-        ret.push(s.clone());
-    }
-
-    if g1(&mut s1) {
-        ret.push(s1);
-    }
-    ret
+    let ss0 = g0(s);
+    let ss1 = g1(&mut s1);
+    mplus(&ss0, &ss1)
 }
 
 #[cfg(test)]
@@ -245,18 +341,16 @@ mod test {
 
     #[test]
     fn var_basic() {
-        let a = Var::new("a".to_string(), 0);
-        println!("a : {}", a);
-        let x1 = Var::new_x(1);
-        println!("x1 : {}", x1);
-        assert_eq!(a == a, true);
+        let x0 = Var::new(0);
+        let x1 = Var::new(1);
+        assert_eq!(x0 == x0, true);
         assert_eq!(x1 == x1, true);
-        assert_eq!(a == x1, false);
+        assert_eq!(x0 == x1, false);
     }
 
     #[test]
     fn value_basic() {
-        let x0 = Var::new_x(0);
+        let x0 = Var::new(0);
         let v0 = Value::Variable(x0);
         let v1 = Value::Num(1);
         assert_eq!(v0.is_variable(), true);
@@ -265,7 +359,7 @@ mod test {
 
     #[test]
     fn assoc_basic() {
-        let x0 = Var::new_x(0);
+        let x0 = Var::new(0);
         let v0 = Value::Num(1);
         let a0 = Assoc::new(x0.clone(), v0.clone());
         assert_eq!(a0.get_var(), &x0);
@@ -277,54 +371,63 @@ mod test {
         let v0 = Value::Num(1);
         let mut s = Subst::new();
         let ret = unify(&v0, &v0, &mut s);
-        println!("{:?}", s);
         assert_eq!(ret, true);
+        assert_eq!(s.is_empty(), true);
 
-        let x0 = Var::new_x(0);
-        let v1 = Value::new_var(x0);
+        let x0 = Var::new(0);
+        let v1 = Value::new_var(x0.clone());
         let mut s = Subst::new();
         let ret = unify(&v1, &v1, &mut s);
-        println!("{:?}", s);
         assert_eq!(ret, true);
+        assert_eq!(s.is_empty(), true);
+
+        let mut expected_s = Subst::new();
+        expected_s.ext(x0.clone(), v0.clone());
 
         let mut s = Subst::new();
         let ret = unify(&v0, &v1, &mut s);
-        println!("{:?}", s);
         assert_eq!(ret, true);
+        assert_eq!(s, expected_s);
 
         let mut s = Subst::new();
         let ret = unify(&v1, &v0, &mut s);
-        println!("{:?}", s);
         assert_eq!(ret, true);
+        assert_eq!(s, expected_s);
 
         let mut s = Subst::new();
         let v2 = Value::Num(2);
         let ret = unify(&v0, &v2, &mut s);
-        println!("{:?}", s);
         assert_eq!(ret, false);
+        assert_eq!(s.is_empty(), true);
     }
 
     #[test]
     fn goal_basic() {
         let mut s = State::empty_state();
         let x0 = fresh(&mut s);
-        let ret = same(Value::new_var(x0.clone()), Value::new_num(1), &mut s);
-        assert_eq!(ret, true);
+        let mut ss = same(Value::new_var(x0.clone()), Value::new_num(1), &mut s);
+        assert_eq!(ss.len(), 1);
         let x1 = fresh(&mut s);
-        let ret = same(Value::new_var(x0), Value::new_var(x1.clone()), &mut s);
-        assert_eq!(ret, true);
-        println!("x1 = {:?}", s.lookup(&Value::new_var(x1)));
+        let ss1 = bind(&mut ss, &|s| {
+            same(Value::new_var(x0.clone()), Value::new_var(x1.clone()), s)
+        });
+        assert_eq!(ss1.len(), 1);
+        // result  x1 = 1
+        assert_eq!(
+            ss1.latest_state().lookup(&Value::new_var(x1)),
+            Value::new_num(1)
+        );
     }
 
-    fn fives(x: Var, s: &mut State) -> bool {
+    fn fives(x: Var, s: &mut State) -> SStream {
         same(Value::new_var(x), Value::new_num(5), s)
     }
 
-    fn six(x: Var, s: &mut State) -> bool {
+    fn six(x: Var, s: &mut State) -> SStream {
         same(Value::new_var(x), Value::new_num(6), s)
     }
 
-    fn fivesorsix(x: Var, s: &mut State) -> Vec<State> {
+    fn fivesorsix(x: Var, s: &mut State) -> SStream {
         disj(&|s1| fives(x.clone(), s1), &|s2| six(x.clone(), s2), s)
     }
 
@@ -332,6 +435,6 @@ mod test {
     fn goal_complex() {
         let mut s = State::empty_state();
         let x0 = fresh(&mut s);
-        println!("result = {:?}", fivesorsix(x0.clone(), &mut s));
+        println!("result = {}", fivesorsix(x0.clone(), &mut s));
     }
 }
